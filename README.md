@@ -1,5 +1,8 @@
 # ztile
 
+> [!NOTE]  
+> This is unfinished and probably won't work properly
+
 A utility for X11 that allows windows to slot into pre-configured zones.
 
 ## Usage
