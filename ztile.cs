@@ -4,7 +4,7 @@
 #:package System.CommandLine@2.0.2
 #:package Tomlyn.Signed@0.20.0
 
-#:property Version=0.0.1
+#:property Version=0.0.2
 #:property AllowUnsafeBlocks=true
 
 /* Software to make my desktop less fucked
@@ -21,6 +21,7 @@
 
 using System.CommandLine;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
 using System.Text;
 using TerraFX.Interop.Xlib;
@@ -31,10 +32,7 @@ const long ReleaseThresholdMs = 50;
 
 bool shouldRun = true;
 
-var cmd = new RootCommand("Utility for X11 that allows windows to slot into pre-configured zones")
-{
-};
-
+var cmd = new RootCommand("Utility for X11 that allows windows to slot into pre-configured zones");
 cmd.SetAction(c =>
 {
     RunLoop();
@@ -50,6 +48,16 @@ return cmd.Parse(args).Invoke();
 unsafe void RunLoop()
 {
     Xlib.XInitThreads();
+    Xlib.XSetErrorHandler(&OnXError);
+
+    [UnmanagedCallersOnly]
+    static int OnXError(Display* display, XErrorEvent* error)
+    {
+        Console.Error.WriteLine("X error: {0}", error->error_code);
+        // Console.Error.WriteLine(new System.Diagnostics.StackTrace());
+        // throw new Exception(error->error_code.ToString());
+        return 0;
+    }
 
     Stopwatch clock = new();
     clock.Start();
@@ -67,6 +75,10 @@ unsafe void RunLoop()
     var display = Xlib.XOpenDisplay(null);
     var root = Xlib.DefaultRootWindow(display);
     Console.WriteLine("Running on display {0}", UmHelp.AsString(display->display_name));
+
+    Atom netFrameExtents = default;
+    fixed (byte* atomName = Encoding.ASCII.GetBytes("_NET_FRAME_EXTENTS\0"))
+        netFrameExtents = Xlib.XInternAtom(display, (sbyte*)atomName, 0);
 
     Window pointerRootWindow = default, pointerChildWindow = default;
 
@@ -110,7 +122,7 @@ unsafe void RunLoop()
                     if (!trackedWindows.Remove(n, out var tracked))
                         continue;
 
-                    Console.WriteLine("Dropped {0}", n);
+                    Console.WriteLine($"Dropped {n:X}");
 
                     Window myRoot;
                     int myX, myY;
@@ -125,7 +137,6 @@ unsafe void RunLoop()
                                 if (zone.IsPointInside(mouseX, mouseY))
                                 {
                                     Console.WriteLine("Dropped in zone at {0}, {1}", zone.X, zone.Y);
-
 
                                     MapWindowTo(tracked.Window, zone);
 
@@ -163,7 +174,7 @@ unsafe void RunLoop()
                             tracked.LastUpdateTime = clock.ElapsedMilliseconds;
                         else
                         {
-                            Console.WriteLine("Picked up {0}", n.window);
+                            Console.WriteLine($"Picked up {n.window:X}");
                             trackedWindows.Add(n.window, new TrackedWindow
                             {
                                 LastUpdateTime = clock.ElapsedMilliseconds,
@@ -217,35 +228,10 @@ unsafe void RunLoop()
         if (zone.W * zone.H < 1)
             return;
 
-        Atom atomExtents = default, actualType = default;
-        int actualFormat = 0;
-        nuint numItems = 0, bytesAfter = 0;
-        long* data = null;
-        fixed (byte* atomName = Encoding.ASCII.GetBytes("_NET_FRAME_EXTENTS\0"))
-            atomExtents = Xlib.XInternAtom(display, (sbyte*)atomName, 0);
-
-        int left = 2, right = 2, top = 21, bottom = 2; // <- set to default values of MY personal fucking shit
-
-        Xlib.XSync(display, 0); // <- does nothing
-
-        // ALWAYS RETURNS FAIL, DAtA NOT POPULATED. FUCK MY LIFE
-        // WAAAAAAAAAAAAWD)U* HAW*O&HAWJd 09AP*Jdada
-        var status = Xlib.XGetWindowProperty(display, window, atomExtents,
-            0, 4, 0, (Atom)Xlib.AnyPropertyType,
-            &actualType, &actualFormat, &numItems, &bytesAfter, (byte**)&data);
-
-        if (numItems == 4 && data != null)
-        {
-            left = (int)data[0];
-            right = (int)data[1];
-            top = (int)data[2];
-            bottom = (int)data[3];
-            _ = Xlib.XFree(data);
-        }
-
-        XEvent ev;
+        window = FindFramedWindow(window, out var left, out var top, out var right, out var bottom);
         var mask = Xlib.SubstructureNotifyMask | Xlib.SubstructureRedirectMask;
 
+        var ev = new XEvent();
         ev.xclient.type = Xlib.ClientMessage;
         ev.xclient.serial = 0;
         ev.xclient.send_event = 1;
@@ -268,6 +254,63 @@ unsafe void RunLoop()
         Xlib.XSendEvent(display, root, 0, mask, &ev);
     }
 
+    // return first child with the _NET_FRAME_EXTENTS property, or returns origin
+    Window FindFramedWindow(Window origin, out int left, out int top, out int right, out int bottom)
+    {
+        left = 0;
+        top = 0;
+        right = 0;
+        bottom = 0;
+
+        // find frame extents property, return if found
+        long* data = null;
+        try
+        {
+            Atom actualType = default;
+            int actualFormat = 0;
+            nuint numItems = 0, bytesAfter = 0;
+            var status = Xlib.XGetWindowProperty(display, origin, netFrameExtents,
+                0, 4, 0, Xlib.XA_CARDINAL,
+                &actualType, &actualFormat, &numItems, &bytesAfter, (byte**)&data);
+            if (data != null && numItems == 4)
+            {
+                left = (int)data[0];
+                right = (int)data[1];
+                top = (int)data[2];
+                bottom = (int)data[3];
+                return origin;
+            }
+        }
+        finally
+        {
+            if (data != null)
+                Xlib.XFree(data);
+        }
+
+        // otherwise we just continue searching downnnnnnn
+        Window parent, root;
+        Window* children = null;
+        uint numChildren;
+        try
+        {
+            if (Xlib.XQueryTree(display, origin, &root, &parent, &children, &numChildren) == 1)
+            {
+                for (int i = 0; i < numChildren; i++)
+                {
+                    var r = FindFramedWindow(children[i], out left, out top, out right, out bottom);
+                    if (r != children[i])
+                        return r;
+                }
+            }
+        }
+        finally
+        {
+            if (children != null)
+                Xlib.XFree(children);
+        }
+
+        return origin;
+    }
 }
 
 public class TrackedWindow
