@@ -21,6 +21,8 @@ zones = [
 ]
 ```
 
+To select zones, you can use a tool like [slop](https://github.com/naelstrof/slop).
+
 ## Building
 
 You need .NET 10 to use this program.
