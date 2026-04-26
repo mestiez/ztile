@@ -93,6 +93,8 @@ unsafe void RunLoop()
     // TODO THIS LOOP MIGHT CUT OUT. HANDLE EXCEPTIONS PL0X
     while (shouldRun)
     {
+		Thread.Sleep(10);
+    
         int mouseX, mouseY;
         int mouseWinX, mouseWinY;
         uint pointerMask;
